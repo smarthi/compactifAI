@@ -7,6 +7,7 @@ from quantum_tensors.benchmarks.data import load_elitr, load_qmsum
 
 
 def test_load_qmsum_original_shape(tmp_path: Path) -> None:
+    """Verify the QMSum loader normalizes the original meeting/query structure."""
     data_dir = tmp_path / "data" / "ALL"
     data_dir.mkdir(parents=True)
     payload = [
@@ -24,6 +25,7 @@ def test_load_qmsum_original_shape(tmp_path: Path) -> None:
 
 
 def test_load_elitr_inline_shape(tmp_path: Path) -> None:
+    """Verify the ELITR loader accepts records with inline transcript and QA data."""
     payload = [
         {
             "meeting_id": "e1",
@@ -36,4 +38,3 @@ def test_load_elitr_inline_shape(tmp_path: Path) -> None:
     assert len(examples) == 1
     assert examples[0].question == "When is the demo?"
     assert examples[0].reference == "Friday."
-

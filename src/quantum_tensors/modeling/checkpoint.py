@@ -15,6 +15,12 @@ ADAPTER_WEIGHTS = "tensorized_model.safetensors"
 
 
 def _get_submodule_parent(root: nn.Module, qualified_name: str) -> tuple[nn.Module, str]:
+    """Return the parent module and child attribute for a qualified name.
+
+    Adapter loading must replace dense modules at their original location inside
+    the base model. Use this helper before assigning reconstructed ``MPOLinear``
+    modules into the model tree.
+    """
     parts = qualified_name.split(".")
     parent = root
     for part in parts[:-1]:
@@ -23,6 +29,11 @@ def _get_submodule_parent(root: nn.Module, qualified_name: str) -> tuple[nn.Modu
 
 
 def _module_entries(model: nn.Module) -> list[tuple[str, MPOLinear]]:
+    """Collect all MPO modules currently present in a model.
+
+    Adapter saving only needs tensorized layers, not the full base model. Use
+    this helper to enumerate the modules whose cores and biases should be stored.
+    """
     return [(name, module) for name, module in model.named_modules() if isinstance(module, MPOLinear)]
 
 
@@ -32,6 +43,12 @@ def save_tensorized_adapter(
     base_model_id: str,
     extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Save tensorized layers as a lightweight adapter directory.
+
+    The base model can be reloaded from Hugging Face, so the checkpoint only
+    stores MPO cores, biases, module metadata, and conversion settings. Use this
+    after compression or healing to persist a reproducible tensorized model.
+    """
     output_path = ensure_dir(output_dir)
     state = {}
     modules = []
@@ -69,6 +86,13 @@ def load_tensorized_adapter(
     checkpoint_dir: str | Path,
     strict: bool = True,
 ) -> dict[str, Any]:
+    """Load a tensorized adapter into a base model in-place.
+
+    This reconstructs every saved ``MPOLinear`` and swaps it into the matching
+    module path while preserving the original device and dtype when possible. Use
+    it immediately after loading the base model for benchmark inference or
+    healing.
+    """
     checkpoint_path = Path(checkpoint_dir)
     config = read_json(checkpoint_path / ADAPTER_CONFIG)
     state = load_file(str(checkpoint_path / ADAPTER_WEIGHTS))
@@ -111,4 +135,10 @@ def load_tensorized_adapter(
 
 
 def read_adapter_config(checkpoint_dir: str | Path) -> dict[str, Any]:
+    """Read the JSON metadata for a tensorized adapter.
+
+    Callers often need the base model id and saved module list before loading
+    weights. Use this for lightweight inspection or to choose the correct base
+    model for adapter loading.
+    """
     return read_json(Path(checkpoint_dir) / ADAPTER_CONFIG)

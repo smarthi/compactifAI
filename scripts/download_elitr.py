@@ -7,6 +7,12 @@ from pathlib import Path
 
 
 def main() -> None:
+    """Clone the UTTER repository that contains ELITR-Bench.
+
+    ELITR-Bench data is kept outside the package so experiments can point at a
+    local checkout. Run this script from the command line to create the expected
+    data directory before benchmarking.
+    """
     parser = argparse.ArgumentParser(description="Download the UTTER repository containing ELITR-Bench.")
     parser.add_argument("output_dir", type=Path)
     args = parser.parse_args()
@@ -24,4 +30,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

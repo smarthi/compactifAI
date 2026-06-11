@@ -38,7 +38,13 @@ def compress(
     torch_dtype: str = typer.Option("auto", help="Model dtype: auto, bf16, fp16, fp32."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Load a base model, replace selected Linear layers with MPO modules, and save an adapter."""
+    """Convert a base model into a tensorized adapter checkpoint.
+
+    This command implements the CompactifAI-style compression step by replacing
+    selected dense linear layers with MPO modules and saving only the tensorized
+    adapter weights. Use it first in an experiment, before healing or benchmark
+    evaluation.
+    """
     model, tokenizer = load_hf_model(model_id=model_id, checkpoint_dir=None, torch_dtype=torch_dtype, device_map=device_map)
     before = count_parameters(model)
     config = TensorizationConfig(
@@ -89,6 +95,12 @@ def benchmark_qmsum(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
+    """Evaluate a base or tensorized model on QMSum summarization.
+
+    This command loads QMSum, generates query-focused meeting summaries, computes
+    ROUGE and token metrics, and writes prediction/summary files. Use it to
+    compare the base gpt-oss-20b model against compressed or healed adapters.
+    """
     summary = run_qmsum_benchmark(
         model_id=model_id,
         qmsum_path=qmsum_path,
@@ -121,6 +133,13 @@ def benchmark_elitr(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
+    """Evaluate a base or tensorized model on ELITR-Bench meeting QA.
+
+    This command runs single-turn or multi-turn meeting assistant prompts,
+    computes lexical proxy metrics, and optionally calls an OpenAI judge. Use it
+    to measure whether tensorization preserves meeting-question answering
+    behavior.
+    """
     summary = run_elitr_benchmark(
         model_id=model_id,
         elitr_path=elitr_path,
@@ -155,6 +174,12 @@ def heal(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
+    """Run post-compression supervised healing on an MPO adapter.
+
+    Tensorization truncates weights layer by layer, so a short fine-tuning phase
+    helps recover task quality. Use this command after ``compress`` with either
+    custom JSONL instruction data or QMSum-derived examples.
+    """
     config = HealingConfig(
         output_dir=str(output_dir),
         dataset_jsonl=str(dataset_jsonl) if dataset_jsonl else None,
@@ -186,7 +211,12 @@ def profile(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Profile layer reconstruction error for a rank/order before expensive task profiling."""
+    """Profile reconstruction error for candidate tensorized layers.
+
+    This lightweight diagnostic estimates how much each selected layer changes at
+    a given MPO rank and order before running expensive task benchmarks. Use it
+    to pick layer ranges or ranks for a full compression run.
+    """
     import torch
     from torch import nn
 
@@ -227,4 +257,3 @@ def profile(
     ensure_dir(output_file.parent)
     write_json(output_file, {"model_id": model_id, "rank": max_rank, "order": order, "modules": rows})
     typer.echo(f"Wrote {len(rows)} module profiles to {output_file}")
-

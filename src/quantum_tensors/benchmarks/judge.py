@@ -19,6 +19,12 @@ def score_with_openai_judge(
     prediction: str,
     model: str,
 ) -> dict[str, object]:
+    """Score a meeting QA answer with an OpenAI rubric judge.
+
+    ELITR-Bench benefits from semantic evaluation because lexical overlap can
+    miss correct paraphrases. Use this when ``OPENAI_API_KEY`` is available and a
+    benchmark run requests judge scoring through ``--judge-model``.
+    """
     if not os.environ.get("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY is required for OpenAI judge scoring.")
 
@@ -42,4 +48,3 @@ def score_with_openai_judge(
     score_match = re.search(r"score[\"']?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", text, flags=re.I)
     score = float(score_match.group(1)) if score_match else None
     return {"judge_score": score, "judge_raw": text}
-

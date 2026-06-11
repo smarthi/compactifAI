@@ -7,6 +7,7 @@ from quantum_tensors.mpo import MPOLinear, decompose_matrix_to_mpo, infer_mpo_fa
 
 
 def test_mpo_reconstructs_small_matrix_at_full_rank() -> None:
+    """Verify full-rank MPO decomposition can reconstruct a small dense matrix."""
     torch.manual_seed(7)
     weight = torch.randn(12, 10)
     out_dims, in_dims = infer_mpo_factors(12, 10, order=3)
@@ -16,6 +17,7 @@ def test_mpo_reconstructs_small_matrix_at_full_rank() -> None:
 
 
 def test_mpo_linear_matches_dense_forward_at_full_rank() -> None:
+    """Verify an MPO-wrapped linear layer matches the original dense forward pass."""
     torch.manual_seed(9)
     linear = nn.Linear(10, 12)
     mpo = MPOLinear.from_linear(linear, max_rank=128, order=3)
@@ -24,9 +26,9 @@ def test_mpo_linear_matches_dense_forward_at_full_rank() -> None:
 
 
 def test_mpo_linear_compresses_parameter_count() -> None:
+    """Verify low-rank MPO layers reduce parameter count versus dense layers."""
     linear = nn.Linear(64, 64)
     mpo = MPOLinear.from_linear(linear, max_rank=4, order=4)
     assert sum(parameter.numel() for parameter in mpo.parameters()) < sum(
         parameter.numel() for parameter in linear.parameters()
     )
-

@@ -17,6 +17,12 @@ from quantum_tensors.utils import ensure_dir, write_json, write_jsonl
 
 
 def qmsum_messages(example: QMSumExample, tokenizer, max_input_tokens: int) -> list[dict[str, str]]:
+    """Build the chat prompt for one QMSum query-focused summary.
+
+    The model needs the meeting transcript, the user query, and instructions to
+    stay faithful to the transcript. Use this from QMSum evaluation or debugging
+    code before calling ``generate_response``.
+    """
     transcript = truncate_text_to_budget(tokenizer, example.transcript, max_input_tokens=max_input_tokens)
     return [
         {
@@ -47,6 +53,13 @@ def run_qmsum_benchmark(
     torch_dtype: str = "auto",
     device_map: str = "auto",
 ) -> dict[str, object]:
+    """Run QMSum generation, scoring, and report writing.
+
+    This is the end-to-end summarization benchmark entry point: it loads the
+    model and optional MPO adapter, generates summaries, computes ROUGE/token
+    metrics, and writes predictions plus a summary JSON. Use it from the CLI or
+    from notebooks when comparing compression settings.
+    """
     output_path = ensure_dir(output_dir)
     generation_config = generation_config or GenerationConfig()
     model, tokenizer = load_hf_model(
@@ -90,4 +103,3 @@ def run_qmsum_benchmark(
     write_jsonl(output_path / "predictions.jsonl", rows)
     write_json(output_path / "summary.json", summary)
     return summary
-
