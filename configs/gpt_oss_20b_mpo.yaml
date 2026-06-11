@@ -1,0 +1,21 @@
+model_id: openai/gpt-oss-20b
+tensorization:
+  max_rank: 16
+  order: 4
+  layer_start: 8
+  layer_end: null
+  min_linear_size: 4096
+  target_regex: "(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj|gate_up_proj|c_attn|c_proj|mlp|expert)"
+  exclude_regex: "(lm_head|embed|embedding|router|score)"
+  skip_mlp_output: true
+healing:
+  learning_rate: 0.00001
+  max_steps: 200
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  max_seq_length: 8192
+benchmarks:
+  max_input_tokens: 120000
+  max_new_tokens: 512
+  temperature: 0.0
+

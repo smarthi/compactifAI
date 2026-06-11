@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quantum-tensors"
+version = "0.1.0"
+description = "Quantum-inspired MPO tensorization and meeting benchmarks for gpt-oss-20b."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Quantum Tensors Contributors" }
+]
+dependencies = [
+  "accelerate>=0.34",
+  "datasets>=2.20",
+  "numpy>=1.26",
+  "openai>=1.40",
+  "pydantic>=2.8",
+  "rouge-score>=0.1.2",
+  "safetensors>=0.4.5",
+  "torch>=2.4",
+  "tqdm>=4.66",
+  "transformers>=4.55",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2",
+  "ruff>=0.6",
+  "mypy>=1.11",
+]
+eval = [
+  "bert-score>=0.3.13",
+  "evaluate>=0.4.3",
+]
+quant = [
+  "bitsandbytes>=0.43.3",
+]
+vllm = [
+  "vllm>=0.10.1",
+]
+
+[project.scripts]
+quantum-tensors = "quantum_tensors.cli:app"
+qtensors = "quantum_tensors.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantum_tensors"]
+
+[tool.ruff]
+line-length = 160
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
