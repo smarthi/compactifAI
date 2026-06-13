@@ -7,17 +7,12 @@ import torch
 from torch import nn
 
 from quantum_tensors.mpo import MPOLinear
-from quantum_tensors.utils import compile_optional_regex, module_layer_index
+from quantum_tensors.utils import compile_optional_regex, get_submodule_parent, module_layer_index
 
 
 @dataclass
 class TensorizationConfig:
-    """Configuration controlling which dense linear layers become MPO layers.
-
-    The CompactifAI workflow depends on rank, tensor order, and layer selection
-    choices. Use this dataclass to pass those choices consistently between the
-    CLI, conversion routines, and profiling code.
-    """
+    """Selects which dense linear layers get replaced by MPO layers."""
 
     max_rank: int = 16
     order: int = 4
@@ -26,7 +21,7 @@ class TensorizationConfig:
         r"c_attn|c_proj|mlp|expert)"
     )
     exclude_regex: str = r"(lm_head|embed|embedding|router|score)"
-    min_linear_size: int = 4096
+    min_dense_parameters: int = 1 << 18  # 262144; skip layers smaller than this
     layer_start: int | None = None
     layer_end: int | None = None
     skip_mlp_output: bool = False
@@ -36,13 +31,6 @@ class TensorizationConfig:
 
 @dataclass
 class TensorizedModuleReport:
-    """Per-layer report emitted after tensorization.
-
-    Conversion needs an auditable record of which module was replaced, how it was
-    factorized, and how many parameters were saved. Use these reports to build
-    JSON summaries and compare compression settings.
-    """
-
     name: str
     in_features: int
     out_features: int
@@ -55,50 +43,19 @@ class TensorizedModuleReport:
 
 
 def _iter_named_linears(model: nn.Module) -> Iterable[tuple[str, nn.Linear]]:
-    """Yield qualified names and modules for every dense linear layer.
-
-    Tensorization only targets ``nn.Linear`` leaves, so this helper centralizes
-    discovery before filters are applied. Use it when scanning a loaded model for
-    candidate layers.
-    """
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             yield name, module
 
 
-def _get_submodule_parent(root: nn.Module, qualified_name: str) -> tuple[nn.Module, str]:
-    """Return the parent module and final attribute name for a qualified child.
-
-    In-place layer replacement requires assigning onto the parent object rather
-    than the child reference. Use this immediately before swapping a dense module
-    for an ``MPOLinear``.
-    """
-    parts = qualified_name.split(".")
-    parent = root
-    for part in parts[:-1]:
-        parent = getattr(parent, part)
-    return parent, parts[-1]
-
-
 def _is_mlp_output_projection(name: str) -> bool:
-    """Detect output/down projection layers that may be skipped.
-
-    The CompactifAI paper notes that final MLP projections can be more sensitive
-    to compression. Use this predicate when ``skip_mlp_output`` is enabled in a
-    tensorization config.
-    """
     lowered = name.lower()
     return any(token in lowered for token in ["down_proj", "out_proj", "output_proj", "c_proj"])
 
 
 def should_tensorize_module(name: str, module: nn.Linear, config: TensorizationConfig) -> bool:
-    """Decide whether one dense linear module should be tensorized.
-
-    The selection combines size thresholds, layer ranges, include/exclude
-    regexes, and sensitivity-inspired skip rules. Use it before attempting SVD so
-    conversion stays targeted and reproducible.
-    """
-    if module.in_features * module.out_features < config.min_linear_size:
+    """Apply size, layer-range, regex, and sensitivity filters to one Linear."""
+    if module.in_features * module.out_features < config.min_dense_parameters:
         return False
 
     layer_index = module_layer_index(name)
@@ -120,12 +77,6 @@ def should_tensorize_module(name: str, module: nn.Linear, config: TensorizationC
 
 
 def _parse_svd_dtype(dtype: str) -> torch.dtype:
-    """Convert a configured SVD dtype string into a Torch dtype.
-
-    Decomposition usually benefits from float32 or float64 numerical stability
-    even when the model is loaded in lower precision. Use this before calling the
-    MPO decomposition routine.
-    """
     normalized = dtype.lower()
     if normalized in {"float32", "fp32"}:
         return torch.float32
@@ -135,12 +86,7 @@ def _parse_svd_dtype(dtype: str) -> torch.dtype:
 
 
 def tensorize_model(model: nn.Module, config: TensorizationConfig) -> list[TensorizedModuleReport]:
-    """Replace selected ``nn.Linear`` modules with ``MPOLinear`` modules in-place.
-
-    This is the main conversion function for a loaded Hugging Face model. Use it
-    after loading the base model and before saving an adapter; the returned
-    reports describe every replacement.
-    """
+    """Replace selected ``nn.Linear`` modules with ``MPOLinear`` modules in-place."""
     svd_dtype = _parse_svd_dtype(config.svd_dtype)
     candidates = [
         (name, module)
@@ -157,7 +103,7 @@ def tensorize_model(model: nn.Module, config: TensorizationConfig) -> list[Tenso
             svd_dtype=svd_dtype,
         )
         tensorized = tensorized.to(device=module.weight.device)
-        parent, child_name = _get_submodule_parent(model, name)
+        parent, child_name = get_submodule_parent(model, name)
         setattr(parent, child_name, tensorized)
         info = tensorized.mpo_info()
         reports.append(
@@ -177,12 +123,7 @@ def tensorize_model(model: nn.Module, config: TensorizationConfig) -> list[Tenso
 
 
 def tensorization_summary(reports: list[TensorizedModuleReport]) -> dict[str, object]:
-    """Aggregate per-module tensorization reports into a JSON-ready summary.
-
-    Users need model-level compression numbers in addition to layer-level
-    details. Use this after ``tensorize_model`` to emit conversion reports and CLI
-    status messages.
-    """
+    """Aggregate per-module reports into a JSON-ready model-level summary."""
     dense = sum(report.dense_parameters for report in reports)
     tensorized = sum(report.tensorized_parameters for report in reports)
     return {
@@ -195,12 +136,7 @@ def tensorization_summary(reports: list[TensorizedModuleReport]) -> dict[str, ob
 
 
 def trainable_tensorized_parameters_only(model: nn.Module) -> None:
-    """Freeze all parameters except those inside ``MPOLinear`` modules.
-
-    Healing is meant to tune the compressed adapter cheaply rather than retrain
-    the whole base model. Use this before creating the trainer when the desired
-    behavior is adapter-only healing.
-    """
+    """Freeze everything except parameters inside ``MPOLinear`` modules."""
     for parameter in model.parameters():
         parameter.requires_grad_(False)
     for module in model.modules():
@@ -210,12 +146,6 @@ def trainable_tensorized_parameters_only(model: nn.Module) -> None:
 
 
 def count_parameters(model: nn.Module, trainable_only: bool = False) -> int:
-    """Count model parameters, optionally only those marked trainable.
-
-    Conversion and healing reports need a consistent parameter-count utility.
-    Use it for before/after summaries or to verify that freezing selected the
-    intended trainable subset.
-    """
     if trainable_only:
         return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
     return sum(parameter.numel() for parameter in model.parameters())

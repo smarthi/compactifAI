@@ -19,12 +19,7 @@ from quantum_tensors.utils import ensure_dir, write_json, write_jsonl
 
 
 def elitr_base_messages(example: ELITRExample, tokenizer, max_input_tokens: int) -> list[dict[str, str]]:
-    """Build the single-turn ELITR-Bench QA prompt for one example.
-
-    The prompt gives the transcript and one question while instructing the model
-    not to invent unsupported details. Use this for single-turn QA runs and for
-    inspecting prompt construction.
-    """
+    """Build the single-turn ELITR-Bench QA prompt for one example."""
     transcript = truncate_text_to_budget(tokenizer, example.transcript, max_input_tokens=max_input_tokens)
     return [
         {
@@ -47,12 +42,7 @@ def _score_row(
     latency_seconds: float,
     judge_model: str | None,
 ) -> dict[str, object]:
-    """Create the scored output row for one ELITR-Bench prediction.
-
-    The benchmark needs raw outputs, references, lexical metrics, latency, and
-    optional judge results in one record. Use this after generation in both
-    single-turn and multi-turn modes.
-    """
+    """Build a scored row from one prediction (ROUGE, token F1, EM, optional judge)."""
     scores = rouge_scores(prediction, example.reference)
     row: dict[str, object] = {
         **example.to_dict(),
@@ -74,12 +64,7 @@ def _run_single_turn(
     generation_config: GenerationConfig,
     judge_model: str | None,
 ) -> list[dict[str, object]]:
-    """Evaluate ELITR-Bench examples independently as single-turn QA.
-
-    Single-turn mode isolates each question with the transcript and avoids
-    conversational carryover. Use this when benchmarking direct retrieval and
-    answer quality for compressed versus base models.
-    """
+    """Score each example independently (no conversational state)."""
     rows: list[dict[str, object]] = []
     for example in tqdm(examples, desc="ELITR single-turn"):
         start = perf_counter()
@@ -100,12 +85,7 @@ def _run_multi_turn(
     generation_config: GenerationConfig,
     judge_model: str | None,
 ) -> list[dict[str, object]]:
-    """Evaluate ELITR-Bench examples as per-meeting multi-turn conversations.
-
-    Conversation mode keeps prior questions and answers in context so the model
-    behaves like an interactive meeting assistant. Use this for ELITR settings
-    where follow-up turns and dialogue continuity matter.
-    """
+    """Score each meeting as a single conversation that accumulates prior turns."""
     grouped: dict[str, list[ELITRExample]] = defaultdict(list)
     for example in examples:
         grouped[example.meeting_id].append(example)
@@ -155,13 +135,7 @@ def run_elitr_benchmark(
     torch_dtype: str = "auto",
     device_map: str = "auto",
 ) -> dict[str, object]:
-    """Run ELITR-Bench generation, scoring, and report writing.
-
-    This is the end-to-end meeting QA benchmark entry point: it loads examples,
-    runs the selected interaction mode, computes proxy metrics, optionally calls
-    an LLM judge, and writes predictions plus a summary JSON. Use it from the CLI
-    to compare base, tensorized, and healed checkpoints.
-    """
+    """Run ELITR-Bench generation in the chosen mode and write predictions + summary."""
     output_path = ensure_dir(output_dir)
     generation_config = generation_config or GenerationConfig()
     setting = "conv" if "conv" in mode else "qa"

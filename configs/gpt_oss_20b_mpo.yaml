@@ -4,7 +4,7 @@ tensorization:
   order: 4
   layer_start: 8
   layer_end: null
-  min_linear_size: 4096
+  min_dense_parameters: 262144
   target_regex: "(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj|gate_up_proj|c_attn|c_proj|mlp|expert)"
   exclude_regex: "(lm_head|embed|embedding|router|score)"
   skip_mlp_output: true

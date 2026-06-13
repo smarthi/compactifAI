@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import torch
 
@@ -12,31 +11,12 @@ from quantum_tensors.utils import parse_torch_dtype
 
 @dataclass
 class GenerationConfig:
-    """Runtime generation settings shared by benchmark runners.
-
-    QMSum and ELITR-Bench need consistent controls for output length, sampling,
-    and context truncation. Use this dataclass to pass generation options through
-    CLI commands and programmatic benchmark calls.
-    """
+    """Runtime generation settings shared by benchmark runners."""
 
     max_new_tokens: int = 512
     temperature: float = 0.0
     top_p: float = 1.0
     max_input_tokens: int = 120_000
-
-
-def _auto_model_class(transformers_module: Any):
-    """Pick a suitable Transformers auto model class.
-
-    Model support moves across Transformers releases, and gpt-oss may be exposed
-    through different auto classes. Use this indirection when loading a causal or
-    multimodal generation model from Hugging Face.
-    """
-    if hasattr(transformers_module, "AutoModelForCausalLM"):
-        return transformers_module.AutoModelForCausalLM
-    if hasattr(transformers_module, "AutoModelForMultimodalLM"):
-        return transformers_module.AutoModelForMultimodalLM
-    raise ImportError("Transformers does not expose a usable auto model class.")
 
 
 def load_hf_model(
@@ -45,14 +25,8 @@ def load_hf_model(
     torch_dtype: str = "auto",
     device_map: str = "auto",
 ):
-    """Load a Hugging Face model/tokenizer pair and optional MPO adapter.
-
-    Benchmarks and healing both need the same base-model loading path, including
-    trust-remote-code and adapter replacement. Use this when you want a ready
-    model/tokenizer pair for generation or training.
-    """
-    from transformers import AutoTokenizer
-    import transformers
+    """Load a base causal LM and, if given, swap in a tensorized adapter."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     dtype = parse_torch_dtype(torch_dtype)
     if checkpoint_dir is not None:
@@ -60,8 +34,7 @@ def load_hf_model(
         model_id = adapter.get("base_model_id") or model_id
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-    model_class = _auto_model_class(transformers)
-    model = model_class.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=dtype,
         device_map=device_map,
@@ -76,12 +49,7 @@ def load_hf_model(
 
 
 def truncate_text_to_budget(tokenizer, text: str, max_tokens: int) -> str:
-    """Trim long text to fit a tokenizer budget while preserving head and tail.
-
-    Meeting transcripts can exceed even long context windows, but early and late
-    turns often contain useful setup and decisions. Use this before prompt
-    construction when the transcript may be too large for the model.
-    """
+    """Trim text to ``max_tokens`` preserving head + tail with a middle marker."""
     token_ids = tokenizer.encode(text, add_special_tokens=False)
     if len(token_ids) <= max_tokens:
         return text
@@ -93,12 +61,7 @@ def truncate_text_to_budget(tokenizer, text: str, max_tokens: int) -> str:
 
 
 def render_chat(tokenizer, messages: list[dict[str, str]], max_input_tokens: int):
-    """Render chat messages into tokenizer tensors.
-
-    gpt-oss models rely on the tokenizer chat template for the correct dialogue
-    format, while fallback tokenizers may not define one. Use this immediately
-    before ``model.generate`` to get correctly truncated model inputs.
-    """
+    """Render chat messages into tokenizer tensors, truncating to ``max_input_tokens``."""
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
         encoded = tokenizer.apply_chat_template(
             messages,
@@ -127,12 +90,7 @@ def generate_response(
     messages: list[dict[str, str]],
     config: GenerationConfig,
 ) -> str:
-    """Generate a decoded assistant response for a chat-style prompt.
-
-    This is the benchmark inference primitive: it renders messages, moves tensors
-    to the model device, calls ``generate``, and strips the prompt tokens from the
-    decoded result. Use it for single examples rather than batching.
-    """
+    """Generate one decoded assistant response for a chat-style prompt."""
     encoded = render_chat(tokenizer, messages, max_input_tokens=config.max_input_tokens)
     encoded = {key: value.to(model.device) for key, value in encoded.items()}
     generate_kwargs = {

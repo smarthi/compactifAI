@@ -8,32 +8,13 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 
 from quantum_tensors.mpo import MPOLinear
-from quantum_tensors.utils import ensure_dir, read_json, write_json
+from quantum_tensors.utils import ensure_dir, get_submodule_parent, read_json, write_json
 
 ADAPTER_CONFIG = "tensorized_config.json"
 ADAPTER_WEIGHTS = "tensorized_model.safetensors"
 
 
-def _get_submodule_parent(root: nn.Module, qualified_name: str) -> tuple[nn.Module, str]:
-    """Return the parent module and child attribute for a qualified name.
-
-    Adapter loading must replace dense modules at their original location inside
-    the base model. Use this helper before assigning reconstructed ``MPOLinear``
-    modules into the model tree.
-    """
-    parts = qualified_name.split(".")
-    parent = root
-    for part in parts[:-1]:
-        parent = getattr(parent, part)
-    return parent, parts[-1]
-
-
 def _module_entries(model: nn.Module) -> list[tuple[str, MPOLinear]]:
-    """Collect all MPO modules currently present in a model.
-
-    Adapter saving only needs tensorized layers, not the full base model. Use
-    this helper to enumerate the modules whose cores and biases should be stored.
-    """
     return [(name, module) for name, module in model.named_modules() if isinstance(module, MPOLinear)]
 
 
@@ -43,12 +24,7 @@ def save_tensorized_adapter(
     base_model_id: str,
     extra_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Save tensorized layers as a lightweight adapter directory.
-
-    The base model can be reloaded from Hugging Face, so the checkpoint only
-    stores MPO cores, biases, module metadata, and conversion settings. Use this
-    after compression or healing to persist a reproducible tensorized model.
-    """
+    """Persist MPO cores, biases, and metadata as a lightweight adapter directory."""
     output_path = ensure_dir(output_dir)
     state = {}
     modules = []
@@ -88,32 +64,44 @@ def load_tensorized_adapter(
 ) -> dict[str, Any]:
     """Load a tensorized adapter into a base model in-place.
 
-    This reconstructs every saved ``MPOLinear`` and swaps it into the matching
-    module path while preserving the original device and dtype when possible. Use
-    it immediately after loading the base model for benchmark inference or
-    healing.
+    With ``strict=True`` any missing core or bias raises ``KeyError`` before any
+    modules are swapped. With ``strict=False`` modules with missing tensors are
+    skipped and their names returned under ``"skipped"`` in the config dict.
     """
     checkpoint_path = Path(checkpoint_dir)
     config = read_json(checkpoint_path / ADAPTER_CONFIG)
     state = load_file(str(checkpoint_path / ADAPTER_WEIGHTS))
-    missing: list[str] = []
 
+    plans: list[tuple[dict[str, Any], list, Any]] = []
+    all_missing: dict[str, list[str]] = {}
     for module_config in config["modules"]:
         name = module_config["name"]
+        module_missing: list[str] = []
         cores = []
         for index in range(module_config["num_cores"]):
             key = f"{name}.cores.{index}"
-            if key not in state:
-                missing.append(key)
-                continue
-            cores.append(state[key])
-        bias_key = f"{name}.bias"
-        bias = state[bias_key] if module_config.get("has_bias") and bias_key in state else None
-        if module_config.get("has_bias") and bias is None:
-            missing.append(bias_key)
-        if missing and strict:
-            continue
-        parent, child_name = _get_submodule_parent(model, name)
+            tensor = state.get(key)
+            if tensor is None:
+                module_missing.append(key)
+            else:
+                cores.append(tensor)
+        bias = None
+        if module_config.get("has_bias"):
+            bias_key = f"{name}.bias"
+            bias = state.get(bias_key)
+            if bias is None:
+                module_missing.append(bias_key)
+        if module_missing:
+            all_missing[name] = module_missing
+        else:
+            plans.append((module_config, cores, bias))
+
+    if all_missing and strict:
+        raise KeyError(f"Missing tensorized weights: {all_missing}")
+
+    for module_config, cores, bias in plans:
+        name = module_config["name"]
+        parent, child_name = get_submodule_parent(model, name)
         old_module = getattr(parent, child_name)
         device = getattr(getattr(old_module, "weight", None), "device", None)
         dtype = getattr(getattr(old_module, "weight", None), "dtype", None)
@@ -129,16 +117,11 @@ def load_tensorized_adapter(
             tensorized = tensorized.to(dtype=dtype)
         setattr(parent, child_name, tensorized)
 
-    if missing and strict:
-        raise KeyError(f"Missing tensorized weights: {missing}")
+    if all_missing:
+        config = {**config, "skipped": all_missing}
     return config
 
 
 def read_adapter_config(checkpoint_dir: str | Path) -> dict[str, Any]:
-    """Read the JSON metadata for a tensorized adapter.
-
-    Callers often need the base model id and saved module list before loading
-    weights. Use this for lightweight inspection or to choose the correct base
-    model for adapter loading.
-    """
+    """Read adapter metadata without loading the weights."""
     return read_json(Path(checkpoint_dir) / ADAPTER_CONFIG)

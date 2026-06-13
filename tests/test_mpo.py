@@ -32,3 +32,24 @@ def test_mpo_linear_compresses_parameter_count() -> None:
     assert sum(parameter.numel() for parameter in mpo.parameters()) < sum(
         parameter.numel() for parameter in linear.parameters()
     )
+
+
+def test_mpo_reconstruction_error_decreases_with_rank() -> None:
+    """Higher MPO ranks must recover more of a low-rank-structured matrix."""
+    torch.manual_seed(11)
+    # Build a matrix with deliberate low-rank structure so increasing rank yields
+    # a measurable improvement (a pure-random matrix would show only marginal gains).
+    left = torch.randn(64, 32)
+    right = torch.randn(32, 64)
+    weight = left @ right
+    out_dims, in_dims = infer_mpo_factors(64, 64, order=3)
+
+    errors: list[float] = []
+    weight_norm = torch.linalg.norm(weight)
+    for rank in [1, 4, 16, 64]:
+        cores = decompose_matrix_to_mpo(weight, out_dims, in_dims, max_rank=rank)
+        reconstructed = mpo_to_matrix(cores)
+        errors.append(float(torch.linalg.norm(weight - reconstructed) / weight_norm))
+
+    assert errors[0] >= errors[1] >= errors[2] >= errors[3]
+    assert errors[-1] < 1e-3, f"full-rank reconstruction should be near-exact, got {errors[-1]:.3e}"

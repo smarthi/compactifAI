@@ -30,7 +30,10 @@ def compress(
     order: int = typer.Option(4, help="Number of MPO cores per matrix."),
     target_regex: str = typer.Option(TensorizationConfig.target_regex, help="Regex for target module names."),
     exclude_regex: str = typer.Option(TensorizationConfig.exclude_regex, help="Regex for excluded module names."),
-    min_linear_size: int = typer.Option(4096, help="Minimum dense weight size to tensorize."),
+    min_dense_parameters: int = typer.Option(
+        1 << 18,
+        help="Skip layers whose dense weight has fewer than this many parameters.",
+    ),
     layer_start: Optional[int] = typer.Option(None, help="First transformer layer index to tensorize."),
     layer_end: Optional[int] = typer.Option(None, help="Last transformer layer index to tensorize."),
     skip_mlp_output: bool = typer.Option(False, help="Skip down/out projection modules."),
@@ -38,13 +41,7 @@ def compress(
     torch_dtype: str = typer.Option("auto", help="Model dtype: auto, bf16, fp16, fp32."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Convert a base model into a tensorized adapter checkpoint.
-
-    This command implements the CompactifAI-style compression step by replacing
-    selected dense linear layers with MPO modules and saving only the tensorized
-    adapter weights. Use it first in an experiment, before healing or benchmark
-    evaluation.
-    """
+    """Convert a base model into a tensorized adapter checkpoint."""
     model, tokenizer = load_hf_model(model_id=model_id, checkpoint_dir=None, torch_dtype=torch_dtype, device_map=device_map)
     before = count_parameters(model)
     config = TensorizationConfig(
@@ -52,7 +49,7 @@ def compress(
         order=order,
         target_regex=target_regex,
         exclude_regex=exclude_regex,
-        min_linear_size=min_linear_size,
+        min_dense_parameters=min_dense_parameters,
         layer_start=layer_start,
         layer_end=layer_end,
         skip_mlp_output=skip_mlp_output,
@@ -95,12 +92,7 @@ def benchmark_qmsum(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Evaluate a base or tensorized model on QMSum summarization.
-
-    This command loads QMSum, generates query-focused meeting summaries, computes
-    ROUGE and token metrics, and writes prediction/summary files. Use it to
-    compare the base gpt-oss-20b model against compressed or healed adapters.
-    """
+    """Evaluate a base or tensorized model on QMSum query-focused summarization."""
     summary = run_qmsum_benchmark(
         model_id=model_id,
         qmsum_path=qmsum_path,
@@ -133,13 +125,7 @@ def benchmark_elitr(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Evaluate a base or tensorized model on ELITR-Bench meeting QA.
-
-    This command runs single-turn or multi-turn meeting assistant prompts,
-    computes lexical proxy metrics, and optionally calls an OpenAI judge. Use it
-    to measure whether tensorization preserves meeting-question answering
-    behavior.
-    """
+    """Evaluate a base or tensorized model on ELITR-Bench meeting QA."""
     summary = run_elitr_benchmark(
         model_id=model_id,
         elitr_path=elitr_path,
@@ -174,12 +160,7 @@ def heal(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Run post-compression supervised healing on an MPO adapter.
-
-    Tensorization truncates weights layer by layer, so a short fine-tuning phase
-    helps recover task quality. Use this command after ``compress`` with either
-    custom JSONL instruction data or QMSum-derived examples.
-    """
+    """Run post-compression supervised healing on an MPO adapter."""
     config = HealingConfig(
         output_dir=str(output_dir),
         dataset_jsonl=str(dataset_jsonl) if dataset_jsonl else None,
@@ -211,12 +192,7 @@ def profile(
     torch_dtype: str = typer.Option("auto", help="Model dtype."),
     device_map: str = typer.Option("auto", help="Transformers device_map."),
 ) -> None:
-    """Profile reconstruction error for candidate tensorized layers.
-
-    This lightweight diagnostic estimates how much each selected layer changes at
-    a given MPO rank and order before running expensive task benchmarks. Use it
-    to pick layer ranges or ranks for a full compression run.
-    """
+    """Profile per-layer reconstruction error at a given rank and order."""
     import torch
     from torch import nn
 

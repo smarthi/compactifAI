@@ -27,7 +27,7 @@ output projections.
 
 ## Sources
 
-- CompactifAI paper: https://arxiv.org/pdf/2401.14109
+- CompactifAI paper: https://arxiv.org/abs/2401.14109
 - OpenAI gpt-oss release: https://openai.com/index/introducing-gpt-oss/
 - gpt-oss-20b Hugging Face model: https://huggingface.co/openai/gpt-oss-20b
 - QMSum dataset repo: https://github.com/Yale-LILY/QMSum
@@ -174,4 +174,21 @@ start before expensive benchmark-driven profiling.
   GPU machine with enough memory, and start with later layers and modest ranks.
 - The default generation path uses `tokenizer.apply_chat_template`, which is
   required for gpt-oss harmony formatting in Transformers.
+
+## Caveat: applying CompactifAI to gpt-oss-20b (MoE)
+
+CompactifAI was published and benchmarked on the dense LLaMA-2 7B model. The
+recipe here applies the same SA / MLP MPO decomposition to `gpt-oss-20b`, which
+is a sparse Mixture-of-Experts model. Two things to keep in mind:
+
+- **Expert weights are matched by the regex.** `target_regex` includes
+  `expert`, so every per-expert `up_proj` / `down_proj` / `gate_proj` becomes its
+  own MPO. That means N × num_experts sequential SVDs and N × num_experts MPO
+  modules per layer — slower conversion and a much larger adapter than the dense
+  case.
+- **The paper's layer sensitivity profile does not transfer.** Table I of the
+  paper and the Supplementary Information are LLaMA-2-specific (early blocks
+  sensitive, mid-to-late blocks robust, last MLP per block sensitive). Re-run
+  `quantum-tensors profile` (or, better, an MMLU-style task-metric sweep) on
+  `gpt-oss-20b` before committing to a rank schedule.
 

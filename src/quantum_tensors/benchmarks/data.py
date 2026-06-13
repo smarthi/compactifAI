@@ -8,12 +8,7 @@ from typing import Any, Iterable
 
 @dataclass
 class QMSumExample:
-    """Normalized query-focused summarization example.
-
-    QMSum source files contain meeting transcripts plus general and specific
-    query lists. This dataclass gives benchmark and healing code one stable
-    shape to consume regardless of the original file layout.
-    """
+    """Normalized query-focused summarization example."""
 
     example_id: str
     meeting_id: str
@@ -25,22 +20,12 @@ class QMSumExample:
     domain: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the example into a JSON-serializable dictionary.
-
-        Prediction writers need to preserve inputs, references, and metadata next
-        to model outputs. Use this before appending per-example benchmark rows.
-        """
         return asdict(self)
 
 
 @dataclass
 class ELITRExample:
-    """Normalized ELITR-Bench meeting question-answering example.
-
-    ELITR-Bench mixes meeting context, QA, and conversation-style settings. This
-    dataclass provides the common fields needed by single-turn and multi-turn
-    runners.
-    """
+    """Normalized ELITR-Bench meeting QA example."""
 
     example_id: str
     meeting_id: str
@@ -54,22 +39,10 @@ class ELITRExample:
     answer_position: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the example into a JSON-serializable dictionary.
-
-        Benchmark output rows need the original question, reference, split, and
-        meeting identifiers for later slicing. Use this when writing predictions
-        or judge traces.
-        """
         return asdict(self)
 
 
 def _read_json_any(path: Path) -> Any:
-    """Read either JSON or JSONL data from disk.
-
-    Dataset releases and local conversions often differ in container format, so
-    loaders need one reader that handles both common cases. Use it at the edge of
-    dataset ingestion before normalizing records.
-    """
     with path.open("r", encoding="utf-8") as handle:
         if path.suffix == ".jsonl":
             return [json.loads(line) for line in handle if line.strip()]
@@ -77,12 +50,7 @@ def _read_json_any(path: Path) -> Any:
 
 
 def _flatten_records(payload: Any) -> Iterable[dict[str, Any]]:
-    """Yield meeting-like dictionaries from several possible JSON layouts.
-
-    Public benchmark files can be arrays, dictionaries keyed by meeting id, or a
-    single meeting object. Use this helper so downstream parsing can operate on
-    one record at a time.
-    """
+    """Yield meeting-like dicts from arrays, keyed maps, or single records."""
     if isinstance(payload, list):
         for item in payload:
             if isinstance(item, dict):
@@ -101,12 +69,7 @@ def _flatten_records(payload: Any) -> Iterable[dict[str, Any]]:
 
 
 def _find_split_files(root: Path, split: str, preferred_domain: str | None = None) -> list[Path]:
-    """Find candidate JSON/JSONL files for a split and optional domain.
-
-    QMSum and ELITR checkouts may place split names in filenames or directories,
-    so a tolerant search avoids hard-coding one release layout. Use this before
-    parsing a dataset split from a local checkout.
-    """
+    """Find JSON/JSONL files whose path or stem mentions ``split``."""
     split_tokens = {
         "validation": ["validation", "valid", "val", "dev"],
         "valid": ["validation", "valid", "val", "dev"],
@@ -127,12 +90,7 @@ def _find_split_files(root: Path, split: str, preferred_domain: str | None = Non
 
 
 def _meeting_transcript_to_text(transcript: Any) -> str:
-    """Normalize transcript objects into speaker-prefixed plain text.
-
-    Generation prompts need a single string, while datasets may store transcript
-    turns as strings or dictionaries. Use this in every loader before truncating
-    transcript text for a model context window.
-    """
+    """Render a transcript (string or list of turns) as speaker-prefixed text."""
     if isinstance(transcript, str):
         return transcript
     if isinstance(transcript, list):
@@ -156,13 +114,7 @@ def load_qmsum(
     include_general: bool = True,
     include_specific: bool = True,
 ) -> list[QMSumExample]:
-    """Load and normalize QMSum examples from a local checkout.
-
-    The QMSum benchmark evaluates query-focused meeting summarization, and this
-    loader turns both general and specific query lists into independent examples.
-    Use it for benchmarking, healing data construction, or smoke tests with a
-    manually downloaded QMSum repository.
-    """
+    """Load QMSum examples from a local checkout, one example per query."""
     root = Path(qmsum_path)
     if not root.exists():
         raise FileNotFoundError(f"QMSum path does not exist: {root}")
@@ -219,11 +171,7 @@ def load_qmsum(
 
 
 def _collect_transcript_files(root: Path) -> dict[str, str]:
-    """Collect standalone transcript text files keyed by filename stem.
-
-    Some ELITR-Bench layouts keep transcripts outside the QA JSON records. Use
-    this lookup as a fallback when a meeting record references context indirectly.
-    """
+    """Index standalone transcript files by filename stem."""
     transcripts: dict[str, str] = {}
     for suffix in ["*.txt", "*.md", "*.transcript"]:
         for path in root.rglob(suffix):
@@ -238,11 +186,7 @@ def _collect_transcript_files(root: Path) -> dict[str, str]:
 
 
 def _questions_from_record(record: dict[str, Any], setting: str) -> list[dict[str, Any]]:
-    """Extract QA or conversation question records from a meeting record.
-
-    ELITR-Bench variants use several key names for question lists. Use this
-    helper to select the requested setting while keeping the main loader compact.
-    """
+    """Pull a list of QA dicts from a meeting record, honoring ``setting``."""
     keys = [
         f"{setting}_questions",
         f"{setting}_qa",
@@ -261,12 +205,7 @@ def _questions_from_record(record: dict[str, Any], setting: str) -> list[dict[st
 
 
 def _transcript_from_elitr_record(record: dict[str, Any], transcripts: dict[str, str]) -> str:
-    """Resolve transcript text embedded in or referenced by an ELITR record.
-
-    Benchmark prompts must include meeting context even when the data is split
-    across files. Use this after loading auxiliary transcript files and before
-    constructing ``ELITRExample`` instances.
-    """
+    """Return transcript text from the record itself or from a sidecar file."""
     transcript = _meeting_transcript_to_text(
         record.get("transcript")
         or record.get("meeting_transcript")
@@ -284,12 +223,7 @@ def load_elitr(
     split: str = "test",
     setting: str = "qa",
 ) -> list[ELITRExample]:
-    """Load and normalize ELITR-Bench examples from a local checkout.
-
-    The runner supports both single-turn QA and conversation-style settings, so
-    this loader maps the chosen setting into a shared example format. Use it
-    before running ELITR benchmarks or building local inspection datasets.
-    """
+    """Load ELITR-Bench examples (QA or conversation) from a local checkout."""
     root = Path(elitr_path)
     if not root.exists():
         raise FileNotFoundError(f"ELITR-Bench path does not exist: {root}")
@@ -304,10 +238,7 @@ def load_elitr(
     wanted_setting = "conv" if setting.lower().startswith("conv") else "qa"
     examples: list[ELITRExample] = []
     for file_path in files:
-        lowered = str(file_path).lower()
-        if split.lower() not in lowered and split.lower() not in {"valid", "validation", "val", "dev"}:
-            continue
-        for record_index, record in enumerate(_flatten_records(_read_json_any(file_path))):
+        for record in _flatten_records(_read_json_any(file_path)):
             meeting_id = str(record.get("meeting_id") or record.get("id") or file_path.stem)
             transcript = _transcript_from_elitr_record(record, transcripts)
             questions = _questions_from_record(record, wanted_setting)

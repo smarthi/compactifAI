@@ -13,15 +13,12 @@ from quantum_tensors.modeling.checkpoint import read_adapter_config, save_tensor
 from quantum_tensors.modeling.tensorize import trainable_tensorized_parameters_only
 from quantum_tensors.utils import read_jsonl, write_json
 
+LABEL_IGNORE_INDEX = -100
+
 
 @dataclass
 class HealingConfig:
-    """Configuration for post-compression healing fine-tuning.
-
-    The paper's method recovers accuracy after local SVD truncation by briefly
-    retraining the tensorized model. Use this dataclass to pass dataset, schedule,
-    and trainable-parameter choices into ``run_healing``.
-    """
+    """Configuration for post-compression healing fine-tuning."""
 
     output_dir: str
     dataset_jsonl: str | None = None
@@ -39,154 +36,151 @@ class HealingConfig:
     train_tensorized_only: bool = True
 
 
-def _messages_to_text(tokenizer, messages: list[dict[str, str]]) -> str:
-    """Render chat messages into training text using the tokenizer template.
-
-    Healing data can be stored as message lists, and gpt-oss-style models need
-    their tokenizer's chat format. Use this before tokenizing supervised
-    fine-tuning examples.
-    """
-    if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
-    return "\n\n".join(f"{message['role'].upper()}: {message['content']}" for message in messages)
-
-
-def _record_to_text(tokenizer, record: dict[str, Any]) -> str:
-    """Normalize one healing record into a text sequence.
-
-    Local datasets may use ``messages``, ``prompt``/``completion``, or raw
-    ``text`` fields. Use this to support those common formats without changing
-    the training dataset implementation.
-    """
+def _record_to_messages(record: dict[str, Any]) -> list[dict[str, str]] | None:
+    """Convert a healing record into a chat message list, or None for raw text."""
     if isinstance(record.get("messages"), list):
-        return _messages_to_text(tokenizer, record["messages"])
+        return list(record["messages"])
     if record.get("prompt") is not None and record.get("completion") is not None:
-        messages = [
+        return [
             {"role": "user", "content": str(record["prompt"])},
             {"role": "assistant", "content": str(record["completion"])},
         ]
-        return _messages_to_text(tokenizer, messages)
     if record.get("text") is not None:
-        return str(record["text"])
-    raise ValueError("Healing JSONL records need messages, prompt/completion, or text fields.")
+        return None
+    raise ValueError("Healing records need messages, prompt/completion, or text fields.")
+
+
+def _build_sft_example(
+    tokenizer,
+    record: dict[str, Any],
+    max_seq_length: int,
+) -> tuple[list[int], list[int]]:
+    """Return ``(input_ids, labels)`` with prompt tokens masked to ``-100``.
+
+    For chat-style records we render the full conversation and the prompt-only
+    prefix with the tokenizer's chat template and mask the shared prefix. For raw
+    ``text`` records we fall back to full-sequence causal LM with no masking.
+    """
+    messages = _record_to_messages(record)
+    if messages is None:
+        ids = tokenizer(
+            str(record["text"]),
+            truncation=True,
+            max_length=max_seq_length,
+            add_special_tokens=True,
+        )["input_ids"]
+        return list(ids), list(ids)
+
+    has_template = getattr(tokenizer, "chat_template", None) and hasattr(tokenizer, "apply_chat_template")
+    has_assistant_end = bool(messages) and messages[-1].get("role") == "assistant"
+
+    if not (has_template and has_assistant_end):
+        text = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        ids = tokenizer(text, truncation=True, max_length=max_seq_length, add_special_tokens=True)["input_ids"]
+        return list(ids), list(ids)
+
+    full_ids = list(
+        tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            truncation=True,
+            max_length=max_seq_length,
+        )
+    )
+    prompt_ids = list(
+        tokenizer.apply_chat_template(
+            messages[:-1],
+            tokenize=True,
+            add_generation_prompt=True,
+            truncation=True,
+            max_length=max_seq_length,
+        )
+    )
+    # Mask the longest common prefix. Apply the common-prefix scan instead of
+    # trusting len(prompt_ids) directly because chat templates sometimes append
+    # role-closing tokens to the assistant turn that differ between the two
+    # renderings.
+    prefix = 0
+    for pid, fid in zip(prompt_ids, full_ids):
+        if pid != fid:
+            break
+        prefix += 1
+    labels = [LABEL_IGNORE_INDEX] * prefix + list(full_ids[prefix:])
+    if prefix == len(full_ids):
+        # No completion tokens survived truncation; skip via empty labels.
+        labels = [LABEL_IGNORE_INDEX] * len(full_ids)
+    return full_ids, labels
 
 
 def _qmsum_records(qmsum_path: str, split: str) -> list[dict[str, Any]]:
-    """Convert QMSum examples into chat-style healing records.
-
-    QMSum can double as task-specific healing data for meeting summarization.
-    Use this when ``--qmsum-path`` is provided instead of a custom instruction
-    JSONL file.
-    """
-    records = []
-    for example in load_qmsum(qmsum_path, split=split):
-        records.append(
-            {
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a precise meeting summarization assistant. Use only the transcript.",
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            "Summarize the meeting content requested by the query.\n\n"
-                            f"Query: {example.query}\n\n"
-                            f"Transcript:\n{example.transcript}\n\n"
-                            "Answer with a concise, faithful summary."
-                        ),
-                    },
-                    {"role": "assistant", "content": example.reference},
-                ]
-            }
-        )
-    return records
+    """Convert QMSum examples into chat-style healing records."""
+    return [
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a precise meeting summarization assistant. Use only the transcript.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Summarize the meeting content requested by the query.\n\n"
+                        f"Query: {example.query}\n\n"
+                        f"Transcript:\n{example.transcript}\n\n"
+                        "Answer with a concise, faithful summary."
+                    ),
+                },
+                {"role": "assistant", "content": example.reference},
+            ]
+        }
+        for example in load_qmsum(qmsum_path, split=split)
+    ]
 
 
-class TextSFTDataset(Dataset):
-    """Tokenized supervised fine-tuning dataset backed by text examples.
+class SFTDataset(Dataset):
+    """Lazy chat-style SFT dataset with prompt-masked labels."""
 
-    Healing uses causal language modeling over fully rendered prompt/answer text.
-    Use this small dataset wrapper with a Hugging Face ``Trainer`` and the
-    matching collator below.
-    """
-
-    def __init__(self, texts: list[str], tokenizer, max_seq_length: int) -> None:
-        """Store raw training texts and tokenization settings.
-
-        The dataset tokenizes lazily so startup remains cheap for local JSONL and
-        QMSum-derived training data. Instantiate it inside ``run_healing`` after
-        loading the tokenizer.
-        """
-        self.texts = texts
+    def __init__(self, records: list[dict[str, Any]], tokenizer, max_seq_length: int) -> None:
+        self.records = records
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
 
     def __len__(self) -> int:
-        """Return the number of supervised training examples.
-
-        The Hugging Face trainer uses this to size epochs and progress reporting.
-        Call it implicitly through standard dataset protocols.
-        """
-        return len(self.texts)
+        return len(self.records)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        """Tokenize and return one causal-LM training example.
-
-        Tokenization applies truncation to the configured sequence length so
-        oversized meeting examples cannot break batching. The trainer calls this
-        automatically while forming batches.
-        """
-        encoded = self.tokenizer(
-            self.texts[index],
-            truncation=True,
-            max_length=self.max_seq_length,
-            return_tensors=None,
-            add_special_tokens=True,
-        )
-        return {"input_ids": torch.tensor(encoded["input_ids"], dtype=torch.long)}
+        input_ids, labels = _build_sft_example(self.tokenizer, self.records[index], self.max_seq_length)
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
 
 
-class CausalLMCollator:
-    """Pad text SFT examples and create causal-LM labels.
-
-    The trainer needs consistent input ids, attention masks, and labels where pad
-    tokens are ignored. Use this collator with ``TextSFTDataset`` for healing.
-    """
+class SFTCollator:
+    """Pad input_ids with the tokenizer pad token and labels with ``-100``."""
 
     def __init__(self, tokenizer) -> None:
-        """Store the tokenizer whose pad token defines batch padding.
-
-        Padding must match the model/tokenizer pair being healed. Instantiate the
-        collator after setting a pad token on the tokenizer when necessary.
-        """
         self.tokenizer = tokenizer
 
     def __call__(self, features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-        """Pad a batch and mask padded label positions with ``-100``.
-
-        Hugging Face causal-LM losses ignore labels equal to ``-100``. The
-        trainer invokes this method for each batch.
-        """
-        input_ids = [feature["input_ids"] for feature in features]
-        padded = torch.nn.utils.rnn.pad_sequence(
-            input_ids,
+        pad_id = self.tokenizer.pad_token_id
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            [f["input_ids"] for f in features],
             batch_first=True,
-            padding_value=self.tokenizer.pad_token_id,
+            padding_value=pad_id,
         )
-        attention_mask = (padded != self.tokenizer.pad_token_id).long()
-        labels = padded.clone()
-        labels[attention_mask == 0] = -100
-        return {"input_ids": padded, "attention_mask": attention_mask, "labels": labels}
+        labels = torch.nn.utils.rnn.pad_sequence(
+            [f["labels"] for f in features],
+            batch_first=True,
+            padding_value=LABEL_IGNORE_INDEX,
+        )
+        attention_mask = (input_ids != pad_id).long()
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
 
 
-def load_healing_texts(tokenizer, config: HealingConfig) -> list[str]:
-    """Load and render all configured healing examples as text.
-
-    Healing can combine custom JSONL examples with QMSum-derived examples. Use
-    this before constructing ``TextSFTDataset`` so the training loop sees one
-    uniform list of sequences.
-    """
+def load_healing_records(config: HealingConfig) -> list[dict[str, Any]]:
+    """Load JSONL and QMSum-derived healing records into one list."""
     records: list[dict[str, Any]] = []
     if config.dataset_jsonl:
         records.extend(read_jsonl(config.dataset_jsonl))
@@ -194,7 +188,28 @@ def load_healing_texts(tokenizer, config: HealingConfig) -> list[str]:
         records.extend(_qmsum_records(config.qmsum_path, split=config.qmsum_split))
     if not records:
         raise ValueError("Provide --dataset-jsonl or --qmsum-path for healing.")
-    return [_record_to_text(tokenizer, record) for record in records]
+    return records
+
+
+def _trainer_precision_flags(model, torch_dtype: str) -> tuple[bool, bool]:
+    """Decide ``(bf16, fp16)`` from the requested dtype string and the loaded model."""
+    normalized = torch_dtype.lower()
+    if normalized in {"bf16", "bfloat16"}:
+        return True, False
+    if normalized in {"fp16", "float16", "half"}:
+        return False, True
+    if normalized in {"fp32", "float32", "float"}:
+        return False, False
+    # "auto" or unrecognized — inspect the actual model dtype.
+    try:
+        loaded = next(model.parameters()).dtype
+    except StopIteration:
+        return False, False
+    if loaded == torch.bfloat16:
+        return True, False
+    if loaded == torch.float16:
+        return False, True
+    return False, False
 
 
 def run_healing(
@@ -204,12 +219,7 @@ def run_healing(
     torch_dtype: str = "auto",
     device_map: str = "auto",
 ) -> dict[str, Any]:
-    """Fine-tune a tensorized adapter and save the healed adapter.
-
-    Local SVD compression is not globally optimal, so a short supervised training
-    pass helps recover benchmark quality. Use this after ``compress`` and before
-    running QMSum or ELITR-Bench comparisons.
-    """
+    """Fine-tune a tensorized adapter and save the healed adapter."""
     from transformers import Trainer, TrainingArguments
 
     adapter = read_adapter_config(checkpoint_dir)
@@ -228,9 +238,14 @@ def run_healing(
         model.config.use_cache = False
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
+        # Required when the base model (including input embeddings) is frozen:
+        # otherwise checkpointed segments break the gradient path to MPO cores.
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
 
-    texts = load_healing_texts(tokenizer, config)
-    dataset = TextSFTDataset(texts, tokenizer=tokenizer, max_seq_length=config.max_seq_length)
+    records = load_healing_records(config)
+    dataset = SFTDataset(records, tokenizer=tokenizer, max_seq_length=config.max_seq_length)
+    bf16, fp16 = _trainer_precision_flags(model, torch_dtype)
     args = TrainingArguments(
         output_dir=config.output_dir,
         learning_rate=config.learning_rate,
@@ -241,8 +256,8 @@ def run_healing(
         warmup_ratio=config.warmup_ratio,
         logging_steps=config.logging_steps,
         save_steps=config.save_steps,
-        bf16=torch_dtype.lower() in {"bf16", "bfloat16"},
-        fp16=torch_dtype.lower() in {"fp16", "float16", "half"},
+        bf16=bf16,
+        fp16=fp16,
         report_to=[],
         remove_unused_columns=False,
     )
@@ -250,7 +265,7 @@ def run_healing(
         model=model,
         args=args,
         train_dataset=dataset,
-        data_collator=CausalLMCollator(tokenizer),
+        data_collator=SFTCollator(tokenizer),
     )
     trainer.train()
     output_dir = Path(config.output_dir)
@@ -265,7 +280,7 @@ def run_healing(
         "base_model_id": base_model_id,
         "checkpoint_dir": str(checkpoint_dir),
         "output_dir": str(output_dir),
-        "num_training_records": len(texts),
+        "num_training_records": len(records),
         "train_tensorized_only": config.train_tensorized_only,
         "adapter": saved_config,
     }
