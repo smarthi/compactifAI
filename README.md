@@ -27,7 +27,7 @@ output projections.
 
 ## Sources
 
-- CompactifAI paper: `/Users/suneel.marti/Downloads/CompactifAI.pdf`
+- CompactifAI paper: https://arxiv.org/pdf/2401.14109
 - OpenAI gpt-oss release: https://openai.com/index/introducing-gpt-oss/
 - gpt-oss-20b Hugging Face model: https://huggingface.co/openai/gpt-oss-20b
 - QMSum dataset repo: https://github.com/Yale-LILY/QMSum
